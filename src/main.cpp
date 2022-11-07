@@ -1,8 +1,9 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <WebSocketsClient.h>
 #include <WiFiMulti.h>
-
-#include <ArduinoJson.h>
+#include <timer.h>
+#include <unordered_map>
 
 #define WIFI_SSID "your_wifi_network_name"
 #define WIFI_PASSWORD "your_wifi_password"
@@ -16,6 +17,47 @@
 
 WiFiMulti wifiMulti;
 WebSocketsClient wsClient;
+uniuno::Timer timer;
+
+std::unordered_map<uint8_t, int> pinToDigitalValue;
+std::unordered_map<uint8_t, int> pinToAnalogValue;
+
+void sendPinChangeMessage(uint8_t pin, int value) {
+  char msg[MSG_SIZE];
+
+  sprintf(msg,
+          "{\"action\":\"msg\",\"type\":\"pinChange\",\"body\":{\"pin\":%d,"
+          "\"value\":%d}}",
+          pin, value);
+
+  wsClient.sendTXT(msg);
+}
+
+void notifyAboutDigitalPinChanges() {
+  for (const auto &pair : pinToDigitalValue) {
+    auto pin = pair.first;
+    auto value = pair.second;
+
+    auto digitalReadValue = digitalRead(pin);
+    if (digitalReadValue != value) {
+      sendPinChangeMessage(pin, digitalReadValue);
+      pinToDigitalValue[pin] = digitalReadValue;
+    }
+  }
+}
+
+void notifyAboutAnalogPinChanges() {
+  for (const auto &pair : pinToAnalogValue) {
+    auto pin = pair.first;
+    auto value = pair.second;
+
+    auto analogReadValue = analogRead(pin) / 41 + 1;
+    if (analogReadValue != value) {
+      sendPinChangeMessage(pin, analogReadValue);
+      pinToAnalogValue[pin] = analogReadValue;
+    }
+  }
+}
 
 void sendErrorMessage(const char *error) {
   char msg[MSG_SIZE];
@@ -67,9 +109,6 @@ void handleMessage(uint8_t *payload) {
     }
 
     if (strcmp(doc["body"]["type"], "pinMode") == 0) {
-      /*
-      Uncomment this code for better validation of pinMode command
-
       if (!doc["body"]["mode"].is<const char *>()) {
         sendErrorMessage("invalid pinMode mode type");
         return;
@@ -81,7 +120,6 @@ void handleMessage(uint8_t *payload) {
         sendErrorMessage("invalid pinMode mode value");
         return;
       }
-      */
 
       pinMode(doc["body"]["pin"], toMode(doc["body"]["mode"]));
       sendOkMessage();
@@ -103,6 +141,34 @@ void handleMessage(uint8_t *payload) {
               value);
 
       wsClient.sendTXT(msg);
+      return;
+    }
+
+    if (strcmp(doc["body"]["type"], "digitalListenAdd") == 0) {
+      auto pin = doc["body"]["pin"].as<uint8_t>();
+      pinToDigitalValue.insert({pin, -1});
+      sendOkMessage();
+      return;
+    }
+
+    if (strcmp(doc["body"]["type"], "digitalListenRemove") == 0) {
+      auto pin = doc["body"]["pin"].as<uint8_t>();
+      pinToDigitalValue.erase(pin);
+      sendOkMessage();
+      return;
+    }
+
+    if (strcmp(doc["body"]["type"], "analogListenAdd") == 0) {
+      auto pin = doc["body"]["pin"].as<uint8_t>();
+      pinToAnalogValue.insert({pin, -1});
+      sendOkMessage();
+      return;
+    }
+
+    if (strcmp(doc["body"]["type"], "analogListenRemove") == 0) {
+      auto pin = doc["body"]["pin"].as<uint8_t>();
+      pinToAnalogValue.erase(pin);
+      sendOkMessage();
       return;
     }
 
@@ -145,9 +211,14 @@ void setup() {
 
   wsClient.beginSSL(WS_HOST, WS_PORT, WS_URL, "", "wss");
   wsClient.onEvent(onWSEvent);
+
+  timer.set_interval(notifyAboutDigitalPinChanges, 250);
+  timer.set_interval(notifyAboutAnalogPinChanges, 500);
+  timer.attach_to_loop();
 }
 
 void loop() {
   digitalWrite(LED_BUILTIN, WiFi.status() == WL_CONNECTED);
   wsClient.loop();
+  timer.tick();
 }
